@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>CleanHome</title>
+  <meta name="description" content="Smart mobile cleaning task manager with house layout editor." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=5" />
+</head>
+<body>
+  <!-- ─── App Shell ─────────────────────────────────── -->
+  <div id="app">
+
+    <!-- Header -->
+    <header id="app-header">
+      <div id="header-left">
+        <span id="app-logo">🏠</span>
+        <span id="app-title">CleanHome</span>
+      </div>
+      <div id="header-right">
+        <button id="btn-user-menu">
+          <span class="user-avatar-circle" id="user-avatar-initials"></span>
+          <span class="user-name-short" id="user-name-short"></span>
+        </button>
+      </div>
+    </header>
+    <!-- User dropdown (inside #app for z-index stacking) -->
+    <div id="user-dropdown" class="hidden">
+      <div class="user-dropdown-header">
+        <div class="user-dropdown-name" id="dropdown-name"></div>
+        <div class="user-dropdown-email" id="dropdown-email"></div>
+      </div>
+      <button class="dropdown-item" id="btn-share-house">🔗 Share House</button>
+      <button class="dropdown-item danger" id="btn-sign-out">↪ Sign Out</button>
+    </div>
+
+    <!-- ─── LAYOUT EDITOR VIEW ─────────────────────── -->
+    <section id="view-layout" class="view active">
+      <!-- Sub-toolbar (hidden until Edit mode is active) -->
+      <div id="layout-toolbar" class="toolbar-hidden">
+        <button class="tool-btn active" id="btn-tool-draw" title="Draw cells">✏️ Draw</button>
+        <button class="tool-btn" id="btn-tool-merge" title="Merge rooms">🔗 Merge</button>
+        <button class="tool-btn" id="btn-tool-erase" title="Erase cells">🗑️ Erase</button>
+        <button class="tool-btn" id="btn-tool-label" title="Rename room">🏷️ Label</button>
+        <div class="toolbar-divider"></div>
+        <label class="tool-btn" id="btn-overlay-upload" for="overlay-img-input" title="Upload floor plan to trace over">🖼 Floor Plan</label>
+        <input type="file" id="overlay-img-input" accept="image/*" style="display:none" />
+        <button class="tool-btn" id="btn-overlay-clear" title="Remove floor plan overlay" style="display:none">✕ Clear Overlay</button>
+      </div>
+
+      <!-- Canvas wrapper -->
+      <div id="canvas-wrap">
+        <canvas id="floor-canvas"></canvas>
+      </div>
+
+      <!-- Floating action -->
+      <div id="layout-fab-row">
+        <button id="btn-edit-mode" class="fab-btn secondary">✏️ Edit Layout</button>
+        <button id="btn-save-room" class="fab-btn primary" style="display:none">✔ Save Room</button>
+        <button id="btn-clear-selection" class="fab-btn secondary" style="display:none">✖ Clear</button>
+        <button id="btn-delete-room" class="fab-btn danger" style="display:none">🗑 Delete Room</button>
+      </div>
+
+      <!-- Room list chips -->
+      <div id="room-chips"></div>
+    </section>
+
+    <!-- ─── TASKS VIEW ─────────────────────────────── -->
+    <section id="view-tasks" class="view">
+      <p id="tasks-hint" class="hint-text">Tap a room on the map to add or view its tasks.</p>
+      <div id="tasks-canvas-wrap">
+        <canvas id="tasks-canvas"></canvas>
+      </div>
+      <div id="tasks-list-wrap">
+        <div id="tasks-room-title"></div>
+        <div id="tasks-list"></div>
+        <button id="btn-add-task" class="fab-btn primary" style="display:none">＋ Add Task</button>
+      </div>
+    </section>
+
+    <!-- ─── CLEAN NOW VIEW ──────────────────────────── -->
+    <section id="view-clean" class="view">
+      <div id="clean-header-card">
+        <h2>What can I clean?</h2>
+        <!-- Mode toggle -->
+        <div id="clean-mode-toggle">
+          <button class="clean-mode-btn active" id="btn-mode-time" data-mode="time">⏱ Fits My Time</button>
+          <button class="clean-mode-btn" id="btn-mode-urgent" data-mode="urgent">🔥 Most Urgent</button>
+        </div>
+        <!-- Time mode controls -->
+        <div id="time-mode-panel">
+          <p id="clean-desc-time">Enter your available time. Only tasks that need attention (past 50% of their schedule) will be suggested.</p>
+          <div id="time-input-row">
+            <div id="time-slider-wrap">
+              <div id="time-slider-label"><span id="time-val-display">30 mins</span></div>
+              <input type="range" id="avail-time" min="5" max="240" step="5" value="30" />
+            </div>
+            <button id="btn-go-clean" class="fab-btn primary">Go ▶</button>
+          </div>
+        </div>
+        <!-- Urgent mode description -->
+        <div id="urgent-mode-panel" style="display:none">
+          <p id="clean-desc-urgent">Showing all tasks that need attention, ranked by how overdue they are — regardless of time available.</p>
+        </div>
+      </div>
+      <div id="clean-results"></div>
+    </section>
+
+    <!-- ─── PROGRESS VIEW ────────────────────────────── -->
+    <section id="view-progress" class="view">
+      <div id="progress-hero">
+        <div id="progress-ring-wrap">
+          <svg id="progress-ring" viewBox="0 0 120 120">
+            <circle id="ring-bg"  cx="60" cy="60" r="50" />
+            <circle id="ring-fill" cx="60" cy="60" r="50" />
+          </svg>
+          <div id="progress-ring-label">
+            <span id="progress-pct">0%</span>
+            <span id="progress-ring-sub">on track</span>
+          </div>
+        </div>
+        <div id="progress-hero-text">
+          <div id="progress-motivation"></div>
+          <div id="progress-stats-row"></div>
+        </div>
+      </div>
+
+      <div id="progress-activity">
+        <h3>Activity</h3>
+        <div id="heatmap-outer"></div>
+      </div>
+
+      <div id="progress-rooms"></div>
+    </section>
+
+    <!-- ─── BOTTOM NAV ─────────────────────────────── -->
+    <nav id="bottom-nav">
+      <button class="nav-btn active" data-view="layout" id="nav-layout">
+        <span class="nav-icon">🗺️</span>
+        <span class="nav-label">Layout</span>
+      </button>
+      <button class="nav-btn" data-view="tasks" id="nav-tasks">
+        <span class="nav-icon">✅</span>
+        <span class="nav-label">Tasks</span>
+      </button>
+      <button class="nav-btn" data-view="clean" id="nav-clean">
+        <span class="nav-icon">⚡</span>
+        <span class="nav-label">Clean Now</span>
+      </button>
+      <button class="nav-btn" data-view="progress" id="nav-progress">
+        <span class="nav-icon">🏆</span>
+        <span class="nav-label">Progress</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ─── MODALS ─────────────────────────────────────── -->
+
+  <!-- Room Name Modal -->
+  <div id="modal-room-name" class="modal-overlay" style="display:none">
+    <div class="modal-card">
+      <h3>Name this Room</h3>
+      <input type="text" id="input-room-name" placeholder="e.g. Living Room" maxlength="30" />
+      <div class="modal-color-row" id="room-color-picker"></div>
+      <div class="modal-actions">
+        <button class="modal-btn secondary" id="btn-room-name-cancel">Cancel</button>
+        <button class="modal-btn primary" id="btn-room-name-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Task Modal -->
+  <div id="modal-task" class="modal-overlay" style="display:none">
+    <div class="modal-card tall">
+      <h3 id="modal-task-title">New Task</h3>
+      <label>Task Name</label>
+      <input type="text" id="task-name" placeholder="e.g. Vacuum carpet" maxlength="60" />
+      <label>Time to clean (minutes)</label>
+      <input type="number" id="task-duration" min="1" max="300" placeholder="15" />
+      <label>Clean every (days)</label>
+      <input type="number" id="task-interval" min="1" max="365" placeholder="7" />
+      <label>Photo (optional)</label>
+      <div id="photo-preview-wrap">
+        <img id="task-photo-preview" src="" alt="" style="display:none" />
+        <label id="photo-upload-btn" for="task-photo-input">📷 Add Photo</label>
+        <input type="file" id="task-photo-input" accept="image/*" capture="environment" style="display:none" />
+      </div>
+      <div class="modal-actions">
+        <button class="modal-btn secondary" id="btn-task-cancel">Cancel</button>
+        <button class="modal-btn danger" id="btn-task-delete" style="display:none">Delete</button>
+        <button class="modal-btn primary" id="btn-task-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Alert / Confirm Modal -->
+  <div id="modal-alert" class="modal-overlay" style="display:none">
+    <div class="modal-card">
+      <p id="modal-alert-msg"></p>
+      <div class="modal-actions">
+        <button class="modal-btn primary" id="btn-alert-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Photo Lightbox -->
+  <div id="modal-photo" style="display:none">
+    <img id="modal-photo-img" src="" alt="Task photo" />
+    <button id="modal-photo-close">✕</button>
+  </div>
+
+  <!-- Login Screen -->
+  <div id="login-screen" class="hidden">
+    <div id="login-card">
+      <span id="login-logo-wrap">🏠</span>
+      <div id="login-app-name">CleanHome</div>
+      <p id="login-tagline">Your smart cleaning companion.<br>Sign in to sync your home across all devices.</p>
+      <button id="btn-google-signin">
+        <svg class="google-icon" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.2l6.7-6.7C35.8 2.5 30.2 0 24 0 14.7 0 6.8 5.4 2.9 13.3l7.8 6.1C12.7 13 17.9 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h12.4c-.5 2.8-2.1 5.1-4.5 6.7l7 5.4c4.1-3.8 6.2-9.4 6.2-16.1z"/><path fill="#FBBC05" d="M10.7 28.6A14.6 14.6 0 0 1 9.5 24c0-1.6.3-3.2.8-4.6l-7.8-6.1A23.9 23.9 0 0 0 0 24c0 3.9.9 7.5 2.5 10.7l8.2-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7-5.4c-2.2 1.5-5 2.3-8.9 2.3-6.1 0-11.3-3.5-13.3-9l-7.8 6.1C6.8 42.6 14.7 48 24 48z"/><path fill="none" d="M0 0h48v48H0z"/></svg>
+        Continue with Google
+      </button>
+      <p id="login-footer">Your data is stored securely in the cloud<br>and synced across all your devices.</p>
+    </div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div id="loading-overlay">
+    <div class="loading-spinner"></div>
+    <span class="loading-text">Loading CleanHome…</span>
+  </div>
+
+  <!-- Share House Modal -->
+  <div id="modal-share" class="modal-overlay" style="display:none">
+    <div class="modal-card">
+      <h3>🔗 Share Your House</h3>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:4px">Invite someone to collaborate on your cleaning tasks.</p>
+      <label>Their Google Account Email</label>
+      <input type="email" id="share-email-input" placeholder="e.g. friend@gmail.com" />
+      <div id="share-members-list"></div>
+      <div class="modal-actions">
+        <button class="modal-btn secondary" id="btn-share-cancel">Close</button>
+        <button class="modal-btn primary" id="btn-share-invite">Invite</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Firebase SDKs -->
+  <script src="https://www.gstatic.com/firebasejs/11.0.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.0.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore-compat.js"></script>
+  <script src="app.js?v=5"></script>
+</body>
+</html>
