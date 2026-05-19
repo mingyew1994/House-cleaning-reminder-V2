@@ -24,9 +24,11 @@ firebase.initializeApp({
   appId: '1:893296379379:web:573899cd9e018a5ee87e86',
 });
 const auth = firebase.auth();
-const db   = firebase.firestore();
+const db      = firebase.firestore();
+const storage = firebase.storage();
 let currentUser    = null;
 let currentHouseId = null;
+let userHouses     = [];    // [{ id, name, ownerId, members, ... }] — all houses this user is in
 let _saveTimer     = null;
 let _unsubSnapshot = null;  // real-time listener cleanup
 
@@ -151,6 +153,55 @@ async function compressImage(dataUrl) {
   });
 }
 
+/** Check if a string is a base64 data URL (not a remote URL). */
+function isDataUrl(str) {
+  return str && str.startsWith('data:');
+}
+
+/** Upload a base64 photo to Firebase Storage and return the download URL. */
+async function uploadTaskPhoto(taskId, dataUrl) {
+  if (!currentHouseId || !dataUrl) return null;
+  try {
+    const path = `houses/${currentHouseId}/tasks/${taskId}.jpg`;
+    const ref = storage.ref(path);
+    // Convert data URL to blob
+    const response = await fetch(dataUrl);
+    const blob = await response.blob();
+    await ref.put(blob, { contentType: 'image/jpeg' });
+    return await ref.getDownloadURL();
+  } catch (e) {
+    console.warn('Photo upload failed', e);
+    return dataUrl; // fallback to keeping the data URL
+  }
+}
+
+/** Delete a task's photo from Firebase Storage. */
+async function deleteTaskPhoto(taskId) {
+  if (!currentHouseId) return;
+  try {
+    const path = `houses/${currentHouseId}/tasks/${taskId}.jpg`;
+    await storage.ref(path).delete();
+  } catch (e) {
+    // Ignore — file may not exist
+  }
+}
+
+/** Migrate any remaining base64 photos in state to Firebase Storage. */
+async function migrateBase64Photos() {
+  if (!currentHouseId) return;
+  let changed = false;
+  for (const task of state.tasks) {
+    if (isDataUrl(task.photo)) {
+      const url = await uploadTaskPhoto(task.id, task.photo);
+      if (url && !isDataUrl(url)) {
+        task.photo = url;
+        changed = true;
+      }
+    }
+  }
+  if (changed) saveState();
+}
+
 // ─────────────────────────────────────────────────────────────
 // 3. Canvas Engine
 // ─────────────────────────────────────────────────────────────
@@ -212,7 +263,7 @@ function drawRooms(ctx, rooms, highlightIds = [], cellPx) {
     room.cells.forEach(({ r, c }) => {
       ctx.fillStyle = isHighlighted
         ? hexToRgba(room.color, 0.85)
-        : hexToRgba(room.color, 0.45);
+        : hexToRgba(room.color, 0.18);
       ctx.fillRect(c * px + 1, r * px + 1, px - 2, px - 2);
     });
 
@@ -222,12 +273,10 @@ function drawRooms(ctx, rooms, highlightIds = [], cellPx) {
     if (room.cells.length > 0 && px >= 20) {
       const cx = room.cells.reduce((s, {c}) => s + c, 0) / room.cells.length;
       const cy = room.cells.reduce((s, {r}) => s + r, 0) / room.cells.length;
-      ctx.font = `bold ${px < 26 ? 9 : 11}px Inter, sans-serif`;
+      const fontSize = px < 26 ? 9 : 11;
+      ctx.font = `bold ${fontSize}px Inter, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#1a1a2e';
-      ctx.shadowColor = 'rgba(255,255,255,0.6)';
-      ctx.shadowBlur = 3;
       const words = room.label.split(' ');
       const lines = [];
       let line = '';
@@ -237,11 +286,40 @@ function drawRooms(ctx, rooms, highlightIds = [], cellPx) {
         else { line = test; }
       });
       lines.push(line);
-      const lineH = 13;
+      const lineH = fontSize + 4;
+      const centerX = (cx + 0.5) * px;
+      const centerY = (cy + 0.5) * px;
+
+      // Measure the widest line for the background pill
+      let maxW = 0;
+      lines.forEach(l => { maxW = Math.max(maxW, ctx.measureText(l).width); });
+      const padX = 6, padY = 3;
+      const bgW = maxW + padX * 2;
+      const bgH = lines.length * lineH + padY * 2;
+      const bgX = centerX - bgW / 2;
+      const bgY = centerY - bgH / 2;
+
+      // Draw dark background pill
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      const pillR = 4;
+      ctx.beginPath();
+      ctx.moveTo(bgX + pillR, bgY);
+      ctx.lineTo(bgX + bgW - pillR, bgY);
+      ctx.quadraticCurveTo(bgX + bgW, bgY, bgX + bgW, bgY + pillR);
+      ctx.lineTo(bgX + bgW, bgY + bgH - pillR);
+      ctx.quadraticCurveTo(bgX + bgW, bgY + bgH, bgX + bgW - pillR, bgY + bgH);
+      ctx.lineTo(bgX + pillR, bgY + bgH);
+      ctx.quadraticCurveTo(bgX, bgY + bgH, bgX, bgY + bgH - pillR);
+      ctx.lineTo(bgX, bgY + pillR);
+      ctx.quadraticCurveTo(bgX, bgY, bgX + pillR, bgY);
+      ctx.closePath();
+      ctx.fill();
+
+      // Draw white text on the dark pill
+      ctx.fillStyle = '#ffffff';
       lines.forEach((l, i) => {
-        ctx.fillText(l, (cx + 0.5) * px, (cy + 0.5) * px + (i - (lines.length - 1) / 2) * lineH);
+        ctx.fillText(l, centerX, centerY + (i - (lines.length - 1) / 2) * lineH);
       });
-      ctx.shadowBlur = 0;
     }
   });
 }
@@ -316,7 +394,7 @@ const layoutEditor = (() => {
   const canvas = document.getElementById('floor-canvas');
   let ctx;
 
-  // Current tool: 'draw' | 'merge' | 'erase' | 'label'
+  // Current tool: 'draw' | 'merge' | 'erase' | 'label' | 'move'
   let activeTool = 'draw';
 
   // Cells being painted in current stroke
@@ -331,15 +409,26 @@ const layoutEditor = (() => {
   // Floor plan overlay
   let overlayImg = null;
 
+  // Overlay transform state
+  let overlayScale   = 1.0;   // 1.0 = 100%
+  let overlayOpacity = 0.5;   // 0–1
+  let overlayX       = 0;     // px offset
+  let overlayY       = 0;     // px offset
+  let overlayCrop    = true;  // clip to canvas bounds
+  // For drag-move
+  let moveDragStart  = null;  // { x, y, startOX, startOY }
+
   const btnDraw  = document.getElementById('btn-tool-draw');
   const btnMerge = document.getElementById('btn-tool-merge');
   const btnErase = document.getElementById('btn-tool-erase');
   const btnLabel = document.getElementById('btn-tool-label');
+  const btnMove  = document.getElementById('btn-tool-move');
   const btnSave  = document.getElementById('btn-save-room');
   const btnClear = document.getElementById('btn-clear-selection');
   const btnDel   = document.getElementById('btn-delete-room');
   const btnEditMode = document.getElementById('btn-edit-mode');
   const toolbar  = document.getElementById('layout-toolbar');
+  const overlayControlsEl = document.getElementById('overlay-controls');
   const chipsEl  = document.getElementById('room-chips');
   let editMode   = false;
 
@@ -354,9 +443,63 @@ const layoutEditor = (() => {
     renderAll();
   }
 
+  // ── Overlay controls helpers ─────────────────────
+
+  function showOverlayControls() {
+    overlayControlsEl.classList.remove('overlay-controls-hidden');
+    btnMove.style.display = '';
+  }
+  function hideOverlayControls() {
+    overlayControlsEl.classList.add('overlay-controls-hidden');
+    btnMove.style.display = 'none';
+    if (activeTool === 'move') setTool('draw');
+  }
+
+  function resetOverlayTransform() {
+    overlayScale = 1.0;
+    overlayOpacity = 0.5;
+    overlayX = 0;
+    overlayY = 0;
+    syncOverlaySliders();
+    renderAll();
+  }
+
+  function fitOverlayToCanvas() {
+    if (!overlayImg) return;
+    const { w, h } = canvasSize();
+    const scaleW = w / overlayImg.naturalWidth;
+    const scaleH = h / overlayImg.naturalHeight;
+    overlayScale = Math.min(scaleW, scaleH);
+    overlayX = 0;
+    overlayY = 0;
+    syncOverlaySliders();
+    renderAll();
+  }
+
+  function syncOverlaySliders() {
+    const scaleSlider   = document.getElementById('overlay-scale');
+    const opacitySlider = document.getElementById('overlay-opacity');
+    const xSlider       = document.getElementById('overlay-x');
+    const ySlider       = document.getElementById('overlay-y');
+    const cropCheck     = document.getElementById('overlay-crop-check');
+
+    scaleSlider.value   = Math.round(overlayScale * 100);
+    opacitySlider.value = Math.round(overlayOpacity * 100);
+    xSlider.value       = Math.round(overlayX);
+    ySlider.value       = Math.round(overlayY);
+    cropCheck.checked   = overlayCrop;
+
+    document.getElementById('overlay-scale-val').textContent   = Math.round(overlayScale * 100) + '%';
+    document.getElementById('overlay-opacity-val').textContent  = Math.round(overlayOpacity * 100) + '%';
+    document.getElementById('overlay-x-val').textContent        = Math.round(overlayX);
+    document.getElementById('overlay-y-val').textContent        = Math.round(overlayY);
+  }
+
   function bindOverlayInput() {
-    const input = document.getElementById('overlay-img-input');
+    const input    = document.getElementById('overlay-img-input');
     const clearBtn = document.getElementById('btn-overlay-clear');
+
+    // Upload handler
     input.addEventListener('change', () => {
       const file = input.files[0];
       if (!file) return;
@@ -366,18 +509,67 @@ const layoutEditor = (() => {
         img.onload = () => {
           overlayImg = img;
           clearBtn.style.display = '';
+          resetOverlayTransform();
+          fitOverlayToCanvas();
+          showOverlayControls();
           renderAll();
         };
         img.src = e.target.result;
       };
       reader.readAsDataURL(file);
-      // Reset input so same file can be re-selected
       input.value = '';
     });
+
+    // Clear handler
     clearBtn.addEventListener('click', () => {
       overlayImg = null;
       clearBtn.style.display = 'none';
+      hideOverlayControls();
       renderAll();
+    });
+
+    // Scale slider
+    document.getElementById('overlay-scale').addEventListener('input', e => {
+      overlayScale = parseInt(e.target.value) / 100;
+      document.getElementById('overlay-scale-val').textContent = e.target.value + '%';
+      renderAll();
+    });
+
+    // Opacity slider
+    document.getElementById('overlay-opacity').addEventListener('input', e => {
+      overlayOpacity = parseInt(e.target.value) / 100;
+      document.getElementById('overlay-opacity-val').textContent = e.target.value + '%';
+      renderAll();
+    });
+
+    // X slider
+    document.getElementById('overlay-x').addEventListener('input', e => {
+      overlayX = parseInt(e.target.value);
+      document.getElementById('overlay-x-val').textContent = e.target.value;
+      renderAll();
+    });
+
+    // Y slider
+    document.getElementById('overlay-y').addEventListener('input', e => {
+      overlayY = parseInt(e.target.value);
+      document.getElementById('overlay-y-val').textContent = e.target.value;
+      renderAll();
+    });
+
+    // Crop checkbox
+    document.getElementById('overlay-crop-check').addEventListener('change', e => {
+      overlayCrop = e.target.checked;
+      renderAll();
+    });
+
+    // Fit button
+    document.getElementById('btn-overlay-fit').addEventListener('click', () => {
+      fitOverlayToCanvas();
+    });
+
+    // Reset button
+    document.getElementById('btn-overlay-reset').addEventListener('click', () => {
+      resetOverlayTransform();
     });
   }
 
@@ -395,7 +587,9 @@ const layoutEditor = (() => {
         btnEditMode.textContent = '✏️ Edit Layout';
         btnEditMode.classList.remove('editing');
         toolbar.classList.add('toolbar-hidden');
+        hideOverlayControls();
         canvas.classList.add('canvas-locked');
+        canvas.classList.remove('tool-move');
         pendingCells.clear();
         mergeSelected = [];
         btnSave.style.display = 'none';
@@ -410,8 +604,14 @@ const layoutEditor = (() => {
     activeTool = tool;
     pendingCells.clear();
     mergeSelected = [];
-    [btnDraw, btnMerge, btnErase, btnLabel].forEach(b => b.classList.remove('active'));
-    ({ draw: btnDraw, merge: btnMerge, erase: btnErase, label: btnLabel })[tool].classList.add('active');
+    [btnDraw, btnMerge, btnErase, btnLabel, btnMove].forEach(b => b.classList.remove('active'));
+    ({ draw: btnDraw, merge: btnMerge, erase: btnErase, label: btnLabel, move: btnMove })[tool]?.classList.add('active');
+    // Toggle move cursor
+    if (tool === 'move') {
+      canvas.classList.add('tool-move');
+    } else {
+      canvas.classList.remove('tool-move');
+    }
     updateActionButtons();
     renderAll();
   }
@@ -421,6 +621,7 @@ const layoutEditor = (() => {
     btnMerge.addEventListener('click', () => setTool('merge'));
     btnErase.addEventListener('click', () => setTool('erase'));
     btnLabel.addEventListener('click', () => setTool('label'));
+    btnMove.addEventListener('click',  () => setTool('move'));
   }
 
   function bindCanvasEvents() {
@@ -435,6 +636,18 @@ const layoutEditor = (() => {
     e.preventDefault();
     pointerDown = true;
     canvas.setPointerCapture(e.pointerId);
+
+    if (activeTool === 'move' && overlayImg) {
+      const rect = canvas.getBoundingClientRect();
+      moveDragStart = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+        startOX: overlayX,
+        startOY: overlayY,
+      };
+      return;
+    }
+
     const { r, c } = pointerToCell(canvas, e);
     handleCellInteraction(r, c);
   }
@@ -442,13 +655,28 @@ const layoutEditor = (() => {
   function onPointerMove(e) {
     e.preventDefault();
     if (!pointerDown) return;
+
+    if (activeTool === 'move' && moveDragStart) {
+      const rect = canvas.getBoundingClientRect();
+      const dx = (e.clientX - rect.left) - moveDragStart.x;
+      const dy = (e.clientY - rect.top) - moveDragStart.y;
+      overlayX = moveDragStart.startOX + dx;
+      overlayY = moveDragStart.startOY + dy;
+      syncOverlaySliders();
+      renderAll();
+      return;
+    }
+
     const { r, c } = pointerToCell(canvas, e);
     if (activeTool === 'draw' || activeTool === 'erase') {
       handleCellInteraction(r, c);
     }
   }
 
-  function onPointerUp() { pointerDown = false; }
+  function onPointerUp() {
+    pointerDown = false;
+    moveDragStart = null;
+  }
 
   function handleCellInteraction(r, c) {
     const key = cellKey(r, c);
@@ -629,12 +857,23 @@ const layoutEditor = (() => {
     const { w, h } = canvasSize();
     ctx.clearRect(0, 0, w, h);
 
-    // Draw floor plan overlay (only in edit mode, at 50% opacity)
+    // Draw floor plan overlay (only in edit mode, with transform controls)
     if (editMode && overlayImg) {
       ctx.save();
-      ctx.globalAlpha = 0.5;
-      // Fit the image to the canvas dimensions
-      ctx.drawImage(overlayImg, 0, 0, w, h);
+      ctx.globalAlpha = overlayOpacity;
+
+      // Optionally clip to canvas bounds
+      if (overlayCrop) {
+        ctx.beginPath();
+        ctx.rect(0, 0, w, h);
+        ctx.clip();
+      }
+
+      // Compute the rendered image size
+      const imgW = overlayImg.naturalWidth * overlayScale;
+      const imgH = overlayImg.naturalHeight * overlayScale;
+
+      ctx.drawImage(overlayImg, overlayX, overlayY, imgW, imgH);
       ctx.restore();
     }
 
@@ -960,7 +1199,7 @@ const taskManager = (() => {
     document.getElementById('modal-task').style.display = 'none';
   }
 
-  function saveTask() {
+  async function saveTask() {
     const name     = document.getElementById('task-name').value.trim();
     const duration = parseInt(document.getElementById('task-duration').value);
     const interval = parseInt(document.getElementById('task-interval').value);
@@ -969,7 +1208,10 @@ const taskManager = (() => {
     if (isNaN(duration) || duration < 1) { showAlert('Enter a valid duration.'); return; }
     if (isNaN(interval) || interval < 1) { showAlert('Enter a valid interval.'); return; }
 
+    let taskId;
+
     if (editingTaskId) {
+      taskId = editingTaskId;
       const task = state.tasks.find(t => t.id === editingTaskId);
       if (task) {
         task.name = name;
@@ -978,8 +1220,9 @@ const taskManager = (() => {
         if (photoDataUrl !== undefined) task.photo = photoDataUrl;
       }
     } else {
+      taskId = uid();
       state.tasks.push({
-        id: uid(),
+        id: taskId,
         roomId: selectedRoomId,
         name,
         durationMins: duration,
@@ -989,15 +1232,32 @@ const taskManager = (() => {
       });
     }
 
+    // Upload base64 photo to Firebase Storage if needed
+    const task = state.tasks.find(t => t.id === taskId);
+    if (task && isDataUrl(task.photo)) {
+      closeTaskModal();
+      renderList();
+      renderCanvas();
+      // Upload in background, then update URL
+      const downloadUrl = await uploadTaskPhoto(taskId, task.photo);
+      if (downloadUrl && !isDataUrl(downloadUrl)) {
+        task.photo = downloadUrl;
+      }
+    } else {
+      closeTaskModal();
+      renderList();
+      renderCanvas();
+    }
+
     saveState();
-    closeTaskModal();
     renderList();
-    renderCanvas();
     layoutEditor.renderAll();
   }
 
-  function deleteTask() {
+  async function deleteTask() {
     if (!editingTaskId) return;
+    // Delete photo from Storage
+    deleteTaskPhoto(editingTaskId);
     state.tasks = state.tasks.filter(t => t.id !== editingTaskId);
     saveState();
     closeTaskModal();
@@ -1624,52 +1884,115 @@ function startLiveTimer() {
 // Firebase Auth, House & Sharing
 // ─────────────────────────────────────────────────────────────────
 
-// ── ensureHouseExists: 3-tier lookup so existing AND new users both work.
-async function ensureHouseExists(user) {
-  const userMetaRef = db.collection('userMeta').doc(user.uid);
-
-  // Tier 1: userMeta pointer (fastest — preferred path for returning users)
-  try {
-    const userMetaDoc = await userMetaRef.get();
-    if (userMetaDoc.exists && userMetaDoc.data().houseId) {
-      currentHouseId = userMetaDoc.data().houseId;
-      return;
-    }
-  } catch(e) {
-    // userMeta rules may not be published yet — continue to tier 2
-    console.warn('userMeta read failed, trying house query fallback:', e.message);
-  }
-
-  // Tier 2: query for an existing house where user is a member
-  // (handles users who had a house before userMeta was introduced)
+// ── Multi-house resolver: gets ALL houses the user belongs to.
+// Returns array of { id, name, ownerId, members, ... }. Always at least 1.
+async function resolveHouses(user) {
+  // Always query houses by member — this is the source of truth and works
+  // even if userMeta is stale or the user was just added to a new house.
+  let houses = [];
   try {
     const snap = await db.collection('houses')
-      .where('members', 'array-contains', user.uid).limit(1).get();
-    if (!snap.empty) {
-      currentHouseId = snap.docs[0].id;
-      // Write the pointer now so tier 1 works next time
-      await userMetaRef.set({ houseId: currentHouseId }).catch(() => {});
-      return;
-    }
-  } catch(e) {
-    console.warn('House query fallback failed:', e.message);
+      .where('members', 'array-contains', user.uid).get();
+    houses = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch (e) {
+    console.warn('House query failed:', e.message);
   }
 
-  // Tier 3: brand new user — create a house and migrate localStorage data
-  const rooms = JSON.parse(localStorage.getItem(STORAGE_ROOMS) || '[]');
-  const tasks = JSON.parse(localStorage.getItem(STORAGE_TASKS) || '[]');
-  const houseRef = db.collection('houses').doc();
-  await houseRef.set({
-    ownerId: user.uid,
-    members: [user.uid],
-    rooms,
-    tasks,
-    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+  // Brand new user — no houses at all. Create one and migrate localStorage.
+  if (houses.length === 0) {
+    const rooms = JSON.parse(localStorage.getItem(STORAGE_ROOMS) || '[]');
+    const tasks = JSON.parse(localStorage.getItem(STORAGE_TASKS) || '[]');
+    const houseRef = db.collection('houses').doc();
+    const payload = {
+      ownerId: user.uid,
+      members: [user.uid],
+      name: 'My House',
+      rooms,
+      tasks,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    };
+    await houseRef.set(payload);
+    houses = [{ id: houseRef.id, ...payload }];
+  }
+
+  // Backfill missing names for legacy houses (no write — purely display)
+  houses.forEach(h => { if (!h.name) h.name = h.ownerId === user.uid ? 'My House' : 'Shared House'; });
+  // Sort: owned houses first, then by name
+  houses.sort((a, b) => {
+    const aOwn = a.ownerId === user.uid ? 0 : 1;
+    const bOwn = b.ownerId === user.uid ? 0 : 1;
+    if (aOwn !== bOwn) return aOwn - bOwn;
+    return (a.name || '').localeCompare(b.name || '');
   });
-  currentHouseId = houseRef.id;
-  await userMetaRef.set({ houseId: currentHouseId }).catch(() => {});
-  state.rooms = rooms;
-  state.tasks = tasks;
+  return houses;
+}
+
+// ── Pick which house to load right now.
+// Honors the user's saved active choice. Falls back to legacy houseId,
+// then to the first owned house, then any house.
+async function pickActiveHouse(user, houses) {
+  let saved = null;
+  try {
+    const meta = await db.collection('userMeta').doc(user.uid).get();
+    if (meta.exists) {
+      const d = meta.data();
+      saved = d.activeHouseId || d.houseId || null;  // legacy fallback
+    }
+  } catch (e) { /* permissions may not allow this — fine */ }
+
+  if (saved && houses.some(h => h.id === saved)) return saved;
+  const owned = houses.find(h => h.ownerId === user.uid);
+  return (owned || houses[0]).id;
+}
+
+// ── Detect newly-shared houses since last visit; show a toast for each.
+async function detectAndAnnounceNewHouses(user, houses) {
+  const userMetaRef = db.collection('userMeta').doc(user.uid);
+  let known = null;
+  try {
+    const meta = await userMetaRef.get();
+    if (meta.exists) known = meta.data().knownHouseIds || null;
+  } catch (e) { /* ignore */ }
+
+  const currentIds = houses.map(h => h.id);
+
+  // First time we've ever tracked this user — just record, no toast.
+  if (!Array.isArray(known)) {
+    await userMetaRef.set({ knownHouseIds: currentIds }, { merge: true }).catch(() => {});
+    return;
+  }
+
+  const newOnes = houses.filter(h => !known.includes(h.id) && h.ownerId !== user.uid);
+  if (newOnes.length) {
+    newOnes.forEach(h => showToast(`🏠 You've been added to "${h.name}". Open the menu to switch.`, 7000));
+  }
+  // Update knownHouseIds even if no new ones (so removed houses get pruned)
+  if (newOnes.length || known.length !== currentIds.length) {
+    await userMetaRef.set({ knownHouseIds: currentIds }, { merge: true }).catch(() => {});
+  }
+}
+
+// ── Switch the active house. Saves choice, swaps the live listener.
+async function switchToHouse(houseId) {
+  if (!houseId || houseId === currentHouseId) return;
+  if (!userHouses.some(h => h.id === houseId)) {
+    console.warn('switchToHouse: not a member of', houseId);
+    return;
+  }
+  // Tear down old listener and clear state
+  if (_unsubSnapshot) { _unsubSnapshot(); _unsubSnapshot = null; }
+  currentHouseId = houseId;
+  state.rooms = []; state.tasks = [];
+  // Persist active choice
+  try {
+    await db.collection('userMeta').doc(currentUser.uid)
+      .set({ activeHouseId: houseId }, { merge: true });
+  } catch (e) { /* non-fatal */ }
+  // Bring up the new listener — it will populate state and re-render
+  subscribeToHouse();
+  updateShareLeaveVisibility();
+  renderHouseSwitcher();
+  setSyncStatus('saving');
 }
 
 // ── Real-time listener: keeps state in sync across all devices.
@@ -1681,6 +2004,12 @@ function subscribeToHouse() {
       const d = doc.data();
       state.rooms = d.rooms || [];
       state.tasks = d.tasks || [];
+      // Keep userHouses entry fresh (name, members) so the switcher reflects changes
+      const idx = userHouses.findIndex(h => h.id === currentHouseId);
+      if (idx >= 0) {
+        userHouses[idx] = { id: currentHouseId, ...d };
+        renderHouseSwitcher();
+      }
       // Persist locally as backup
       try {
         localStorage.setItem(STORAGE_ROOMS, JSON.stringify(state.rooms));
@@ -1716,10 +2045,22 @@ async function handleAuthState(user) {
         displayName: user.displayName || '',
       }, { merge: true });
 
-      await ensureHouseExists(user);
+      // Resolve ALL houses (own + any shared), pick which is active
+      userHouses = await resolveHouses(user);
+      currentHouseId = await pickActiveHouse(user, userHouses);
+
+      // Persist the active choice (also writes knownHouseIds first-run baseline)
+      await db.collection('userMeta').doc(user.uid)
+        .set({ activeHouseId: currentHouseId }, { merge: true }).catch(() => {});
+
+      // Tell the user about any new shared houses they got added to
+      await detectAndAnnounceNewHouses(user, userHouses);
 
       // Start the real-time listener — it will populate state and render
       subscribeToHouse();
+
+      // Migrate any legacy base64 photos to Firebase Storage (runs once, in background)
+      setTimeout(() => migrateBase64Photos(), 2000);
 
     } catch (e) {
       console.warn('Firestore setup failed, falling back to localStorage:', e);
@@ -1731,10 +2072,11 @@ async function handleAuthState(user) {
     }
 
     updateUserUI(user);
+    renderHouseSwitcher();
     loginEl.classList.add('hidden');
     loadingEl.classList.add('hidden');
   } else {
-    currentUser = null; currentHouseId = null;
+    currentUser = null; currentHouseId = null; userHouses = [];
     setSyncStatus('offline');
     loginEl.classList.remove('hidden');
     loadingEl.classList.add('hidden');
@@ -1879,32 +2221,47 @@ async function loadShareMembers() {
 }
 
 async function leaveHouse() {
+  const houseToLeave = currentHouseId;
   try {
     // Remove this user from the house members list
-    await db.collection('houses').doc(currentHouseId).update({
+    await db.collection('houses').doc(houseToLeave).update({
       members: firebase.firestore.FieldValue.arrayRemove(currentUser.uid),
     });
-    // Delete the userMeta pointer so ensureHouseExists creates a fresh house
-    await db.collection('userMeta').doc(currentUser.uid).delete().catch(() => {});
   } catch (e) {
     console.warn('leaveHouse error:', e);
+    showAlert('Could not leave the house. Please try again.');
+    return;
   }
-  // Unsubscribe from the old house listener
+
+  // Drop the listener and clear state
   if (_unsubSnapshot) { _unsubSnapshot(); _unsubSnapshot = null; }
-  currentHouseId = null;
-  // Clear local state
   state.rooms = []; state.tasks = [];
-  localStorage.removeItem(STORAGE_ROOMS);
-  localStorage.removeItem(STORAGE_TASKS);
+  userHouses = userHouses.filter(h => h.id !== houseToLeave);
+
   document.getElementById('modal-share').style.display = 'none';
-  // Re-run ensureHouseExists to get (or create) a new house for this user
-  try {
-    await ensureHouseExists(currentUser);
-    subscribeToHouse();
-    showAlert('You have left the house. A new personal house has been created for you.');
-  } catch (e) {
-    console.warn('Post-leave house setup failed:', e);
-    showAlert('You have left the house. Please reload the app.');
+
+  // Switch to another existing house if any, else create a fresh one
+  if (userHouses.length > 0) {
+    const next = userHouses.find(h => h.ownerId === currentUser.uid) || userHouses[0];
+    currentHouseId = null;  // force switchToHouse to actually swap
+    await switchToHouse(next.id);
+    showToast(`Left the house. Switched to "${next.name}".`);
+  } else {
+    currentHouseId = null;
+    localStorage.removeItem(STORAGE_ROOMS);
+    localStorage.removeItem(STORAGE_TASKS);
+    try {
+      userHouses = await resolveHouses(currentUser);  // creates a fresh one
+      currentHouseId = userHouses[0].id;
+      await db.collection('userMeta').doc(currentUser.uid)
+        .set({ activeHouseId: currentHouseId }, { merge: true }).catch(() => {});
+      subscribeToHouse();
+      renderHouseSwitcher();
+      showAlert('You have left the house. A new personal house has been created for you.');
+    } catch (e) {
+      console.warn('Post-leave house setup failed:', e);
+      showAlert('You have left the house. Please reload the app.');
+    }
   }
 }
 
@@ -1921,10 +2278,220 @@ async function shareHouseWithEmail(email) {
   await db.collection('houses').doc(currentHouseId).update({
     members: firebase.firestore.FieldValue.arrayUnion(targetUid),
   });
-  showAlert(`✅ House shared with ${email}!`);
+  // Refresh local copy of members so the modal stays accurate
+  const fresh = await db.collection('houses').doc(currentHouseId).get();
+  const idx = userHouses.findIndex(h => h.id === currentHouseId);
+  if (idx >= 0 && fresh.exists) userHouses[idx] = { id: currentHouseId, ...fresh.data() };
+  showAlert(`✅ House shared with ${email}!\nThey'll see it the next time they open CleanHome.`);
 }
 
-// ── Boot ──────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// House Switcher UI (rendered into the user dropdown)
+// ─────────────────────────────────────────────────────────────────
+function renderHouseSwitcher() {
+  const container = document.getElementById('house-switcher');
+  if (!container) return;
+  if (!userHouses || userHouses.length === 0) { container.innerHTML = ''; return; }
+
+  // Hide the section entirely if user only has 1 house and wants to rename — still useful
+  // We always show it; with 1 house it shows the current name + a rename pencil.
+  const rows = userHouses.map(h => {
+    const isActive = h.id === currentHouseId;
+    const isOwner  = h.ownerId === currentUser.uid;
+    const memberCount = (h.members || []).length;
+    return `
+      <button class="house-switch-row ${isActive ? 'active' : ''}" data-id="${h.id}">
+        <span class="house-switch-check">${isActive ? '●' : '○'}</span>
+        <span class="house-switch-info">
+          <span class="house-switch-name">${escapeHtml(h.name || 'House')}</span>
+          <span class="house-switch-sub">${isOwner ? 'Owner' : 'Member'} · ${memberCount} ${memberCount === 1 ? 'person' : 'people'}</span>
+        </span>
+        ${isOwner ? `<span class="house-switch-rename" data-id="${h.id}" title="Rename">✎</span>` : ''}
+      </button>
+    `;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="house-switcher-label">${userHouses.length > 1 ? 'Switch House' : 'Your House'}</div>
+    ${rows}
+  `;
+
+  // Wire up clicks
+  container.querySelectorAll('.house-switch-row').forEach(row => {
+    row.addEventListener('click', async e => {
+      // If the click was on the rename pencil, handle that instead
+      if (e.target.classList.contains('house-switch-rename')) {
+        e.stopPropagation();
+        promptRenameHouse(e.target.dataset.id);
+        return;
+      }
+      const id = row.dataset.id;
+      document.getElementById('user-dropdown').classList.add('hidden');
+      if (id !== currentHouseId) {
+        await switchToHouse(id);
+        const h = userHouses.find(x => x.id === id);
+        if (h) showToast(`Switched to "${h.name}"`);
+      }
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c =>
+    ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c]);
+}
+
+async function promptRenameHouse(houseId) {
+  const h = userHouses.find(x => x.id === houseId);
+  if (!h) return;
+  const newName = prompt('Rename house', h.name || 'My House');
+  if (newName === null) return;
+  const trimmed = newName.trim().slice(0, 40);
+  if (!trimmed || trimmed === h.name) return;
+  try {
+    await db.collection('houses').doc(houseId).update({ name: trimmed });
+    h.name = trimmed;
+    renderHouseSwitcher();
+    showToast('House renamed');
+  } catch (e) {
+    showAlert('Could not rename: ' + (e.message || 'permission denied'));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Toast notifications
+// ─────────────────────────────────────────────────────────────────
+function showToast(message, duration = 3500) {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = message;
+  host.appendChild(el);
+  // animate in
+  requestAnimationFrame(() => el.classList.add('toast-visible'));
+  setTimeout(() => {
+    el.classList.remove('toast-visible');
+    setTimeout(() => el.remove(), 250);
+  }, duration);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Telegram linking
+// ─────────────────────────────────────────────────────────────────
+// Bot username — UPDATE this to your bot once you create it via @BotFather.
+const TELEGRAM_BOT_USERNAME = 'CleanHomeRemindersBot';
+
+async function openTelegramModal() {
+  const modal = document.getElementById('modal-telegram');
+  modal.style.display = '';
+  document.getElementById('telegram-code-input').value = '';
+  await refreshTelegramStatus();
+}
+
+async function refreshTelegramStatus() {
+  const statusEl  = document.getElementById('telegram-status');
+  const connectEl = document.getElementById('telegram-connect-section');
+  const linkedEl  = document.getElementById('telegram-linked-section');
+  const botLink   = document.getElementById('telegram-bot-link');
+  botLink.href = `https://t.me/${TELEGRAM_BOT_USERNAME}`;
+  botLink.textContent = `@${TELEGRAM_BOT_USERNAME}`;
+
+  try {
+    const doc = await db.collection('userMeta').doc(currentUser.uid).get();
+    const tg = doc.exists ? doc.data().telegram : null;
+    if (tg && tg.chatId) {
+      statusEl.innerHTML = `<span style="color:var(--green)">●</span> Connected${tg.username ? ' as @' + escapeHtml(tg.username) : ''}`;
+      connectEl.style.display = 'none';
+      linkedEl.style.display  = '';
+    } else {
+      statusEl.innerHTML = `<span style="color:var(--text3)">○</span> Not connected`;
+      connectEl.style.display = '';
+      linkedEl.style.display  = 'none';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Could not check status.';
+  }
+}
+
+async function linkTelegram(code) {
+  const cleaned = (code || '').trim().toUpperCase().replace(/\s+/g, '');
+  if (!/^[A-Z0-9]{6}$/.test(cleaned)) {
+    showAlert('That code doesn\'t look right. Codes are 6 characters (letters + numbers).');
+    return;
+  }
+  const btn = document.getElementById('btn-telegram-link');
+  btn.disabled = true; btn.textContent = 'Linking…';
+  try {
+    // Look up the pending code doc — bot writes these into `telegramCodes/{code}`
+    const codeRef = db.collection('telegramCodes').doc(cleaned);
+    const snap = await codeRef.get();
+    if (!snap.exists) {
+      showAlert('Code not found. Make sure you sent /start to the bot first, and try again with the latest code.');
+      return;
+    }
+    const data = snap.data();
+    const expiresAt = data.expiresAt && data.expiresAt.toMillis ? data.expiresAt.toMillis() : 0;
+    if (expiresAt && expiresAt < Date.now()) {
+      showAlert('That code has expired. Send /start to the bot again to get a fresh code.');
+      return;
+    }
+    // Save the link onto userMeta
+    await db.collection('userMeta').doc(currentUser.uid).set({
+      telegram: {
+        chatId: data.chatId,
+        username: data.username || null,
+        linkedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      },
+    }, { merge: true });
+    // Best-effort: delete the consumed code (Cloud Function also TTLs it)
+    codeRef.delete().catch(() => {});
+    showToast('✅ Telegram connected');
+    refreshTelegramStatus();
+  } catch (e) {
+    console.warn('linkTelegram failed', e);
+    showAlert('Linking failed: ' + (e.message || 'please try again'));
+  } finally {
+    btn.disabled = false; btn.textContent = 'Link';
+  }
+}
+
+async function unlinkTelegram() {
+  if (!confirm('Disconnect Telegram? You will stop receiving reminders.')) return;
+  try {
+    await db.collection('userMeta').doc(currentUser.uid).set({
+      telegram: firebase.firestore.FieldValue.delete(),
+    }, { merge: true });
+    showToast('Telegram disconnected');
+    refreshTelegramStatus();
+  } catch (e) {
+    showAlert('Disconnect failed: ' + (e.message || 'try again'));
+  }
+}
+
+function initTelegramUI() {
+  const openBtn = document.getElementById('btn-telegram');
+  if (openBtn) {
+    openBtn.addEventListener('click', () => {
+      document.getElementById('user-dropdown').classList.add('hidden');
+      openTelegramModal();
+    });
+  }
+  document.getElementById('btn-telegram-close').addEventListener('click', () => {
+    document.getElementById('modal-telegram').style.display = 'none';
+  });
+  document.getElementById('btn-telegram-link').addEventListener('click', () => {
+    const code = document.getElementById('telegram-code-input').value;
+    linkTelegram(code);
+  });
+  document.getElementById('btn-telegram-unlink').addEventListener('click', unlinkTelegram);
+}
+
+
 function boot() {
   layoutEditor.init();
   taskManager.init();
@@ -1932,6 +2499,7 @@ function boot() {
   progressTab.init();
   initPhotoLightbox();
   initAuthUI();
+  initTelegramUI();
   startLiveTimer();
   // Auth gates the app — shows loading until user status is known
   auth.onAuthStateChanged(user => handleAuthState(user));
