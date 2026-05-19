@@ -169,7 +169,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   cursor: pointer;
   border: 1.5px solid transparent;
   transition: all .2s;
-  color: #fff;
+  color: #1a1a2e;
   box-shadow: 0 1px 4px rgba(0,0,0,.1);
 }
 .room-chip.selected { box-shadow: 0 0 0 2px #fff, 0 0 0 4px currentColor; }
@@ -619,6 +619,116 @@ input[type="range"]::-webkit-slider-thumb {
   flex-shrink: 0;
 }
 
+/* ── Overlay Image Controls ──────────────────────── */
+#overlay-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 12px;
+  background: linear-gradient(135deg, rgba(108,99,255,.04), rgba(157,88,245,.04));
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  animation: slideDown .2s ease;
+}
+#overlay-controls.overlay-controls-hidden { display: none; }
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.overlay-ctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.overlay-ctrl-label {
+  width: 50px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  flex-shrink: 0;
+}
+.overlay-slider {
+  flex: 1;
+  height: 5px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--surface2);
+  border-radius: 4px;
+  outline: none;
+}
+.overlay-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 6px rgba(108,99,255,.35);
+  transition: transform .15s;
+}
+.overlay-slider::-webkit-slider-thumb:hover { transform: scale(1.15); }
+.overlay-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 6px rgba(108,99,255,.35);
+}
+.overlay-ctrl-value {
+  width: 42px;
+  text-align: right;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.overlay-ctrl-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.overlay-action-btn {
+  padding: 5px 12px;
+  border-radius: 16px;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.overlay-action-btn:hover { border-color: var(--accent); color: var(--accent); }
+.overlay-action-btn:active { transform: scale(.95); }
+
+.overlay-crop-toggle { cursor: pointer; }
+.overlay-crop-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+}
+
+/* Move tool cursor override */
+#floor-canvas.tool-move { cursor: grab !important; }
+#floor-canvas.tool-move:active { cursor: grabbing !important; }
+
 /* ── Clean Now mode toggle ──────────────────────── */
 #clean-mode-toggle {
   display: flex;
@@ -816,3 +926,89 @@ input[type="range"]::-webkit-slider-thumb {
 .share-member-email { font-size: 11px; color: var(--text2); }
 .share-member-badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 10px; background: rgba(108,99,255,.12); color: var(--accent); white-space: nowrap; }
 
+/* ── Share modal action buttons ──────────────────── */
+.share-member-leave-btn {
+  font-size: 11px; font-weight: 600; padding: 4px 10px;
+  border-radius: 10px; border: 1px solid rgba(229,55,43,.3);
+  background: rgba(229,55,43,.08); color: var(--red);
+  cursor: pointer; font-family: inherit; white-space: nowrap;
+  transition: background .15s;
+}
+.share-member-leave-btn:hover { background: rgba(229,55,43,.16); }
+.share-member-remove-btn {
+  font-size: 12px; font-weight: 700; padding: 2px 7px;
+  border-radius: 8px; border: 1px solid rgba(229,55,43,.3);
+  background: rgba(229,55,43,.08); color: var(--red);
+  cursor: pointer; font-family: inherit;
+  transition: background .15s; line-height: 1.4;
+}
+.share-member-remove-btn:hover { background: rgba(229,55,43,.16); }
+
+/* ── House Switcher (in user dropdown) ─────────── */
+#house-switcher:empty { display: none; }
+#house-switcher { border-bottom: 1px solid var(--border); padding: 8px 0 6px; }
+.house-switcher-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase; color: var(--text3);
+  padding: 4px 16px 6px;
+}
+.house-switch-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px;
+  background: none; border: none; width: 100%;
+  cursor: pointer; font-family: inherit; text-align: left;
+  transition: background .15s;
+}
+.house-switch-row:hover { background: var(--surface2); }
+.house-switch-row.active { background: rgba(108,99,255,.08); }
+.house-switch-check {
+  color: var(--accent); font-size: 14px; line-height: 1; width: 14px;
+}
+.house-switch-row:not(.active) .house-switch-check { color: var(--text3); }
+.house-switch-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.house-switch-name {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.house-switch-sub { font-size: 11px; color: var(--text2); }
+.house-switch-rename {
+  font-size: 14px; color: var(--text3); padding: 4px 6px;
+  border-radius: 6px; transition: background .15s, color .15s;
+}
+.house-switch-rename:hover { background: var(--surface2); color: var(--accent); }
+
+/* ── Toast notifications ───────────────────────── */
+#toast-host {
+  position: fixed;
+  bottom: calc(var(--nav-h) + 16px);
+  left: 50%; transform: translateX(-50%);
+  z-index: 9999;
+  display: flex; flex-direction: column-reverse; gap: 8px;
+  pointer-events: none;
+  width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  background: var(--text); color: var(--bg2);
+  padding: 12px 18px; border-radius: var(--radius);
+  font-size: 13px; font-weight: 500; line-height: 1.4;
+  box-shadow: 0 6px 24px rgba(0,0,0,.18);
+  opacity: 0; transform: translateY(12px);
+  transition: opacity .22s ease, transform .22s ease;
+  pointer-events: auto; text-align: center;
+}
+.toast-visible { opacity: 1; transform: translateY(0); }
+
+/* ── Telegram modal styling ─────────────────────── */
+#modal-telegram input[type="text"] {
+  width: 100%; padding: 12px;
+  border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text);
+  font-family: inherit; margin-top: 6px;
+}
+#modal-telegram input[type="text"]:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+#modal-telegram code {
+  font-family: 'SF Mono', Menlo, monospace; font-size: 12px;
+}
